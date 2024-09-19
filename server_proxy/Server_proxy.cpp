@@ -134,7 +134,7 @@ public:
                 std::cout << "Received: " << std::string(buffer, bytes_received) << std::endl;
 
                 // call client_proxy do some work
-                std::string msg = std::string(buffer, bytes_received); 
+                //std::string msg = std::string(buffer, bytes_received); 
                 // std::string msg = client_proxy.response();
                 blocking_que.push((Node){client_socket, msg}); 
             }
