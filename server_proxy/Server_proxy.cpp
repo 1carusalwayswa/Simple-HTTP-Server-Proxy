@@ -10,6 +10,7 @@
 #include "../blocking_queue/Blocking_queue.hpp"
 
 constexpr int MAX_LEN = 4096;
+std::atomic<bool> running(true);
 
 struct Node {
     int client_socket;
@@ -68,7 +69,7 @@ public:
 
     StatusCode run() {
         std::thread(&ServerProxy::handle_response, this).detach();
-        while (true) {
+        while (running) {
             sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
             int client_socket = accept(server_socket, (sockaddr*)&client_addr, &client_len);
@@ -84,10 +85,19 @@ public:
     }
 
     void handle_response() {
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1000));
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             Node res_node = blocking_que.pop();
-            send(res_node.client_socket, res_node.res.c_str(), res_node.res.size(), 0);
+            ssize_t byte_sent = send(res_node.client_socket, res_node.res.c_str(), res_node.res.size(), 0);
+            if (byte_sent == -1) {
+                std::cerr << "Failed to send response" << std::endl;
+                // 处理发送失败的情况，例如关闭套接字
+                close(res_node.client_socket);
+                continue;
+            }
+            std::cout << "[Send]: "
+                      << res_node.res
+                      << std::endl;
         }
     }
 
@@ -95,7 +105,7 @@ public:
         char buffer[MAX_LEN];
         int bytes_received;
 
-        while (true) {
+        while (running) {
             fd_set read_fds;
             FD_ZERO(&read_fds);
             FD_SET(client_socket, &read_fds);
@@ -134,7 +144,7 @@ public:
                 std::cout << "Received: " << std::string(buffer, bytes_received) << std::endl;
 
                 // call client_proxy do some work
-                //std::string msg = std::string(buffer, bytes_received); 
+                std::string msg = std::string(buffer, bytes_received); 
                 // std::string msg = client_proxy.response();
                 blocking_que.push((Node){client_socket, msg}); 
             }
@@ -143,10 +153,14 @@ public:
         close(client_socket);
     }
 
-    ~ServerProxy() {
+    void stop() {
+        running = false;
         if (server_socket != -1) {
             close(server_socket);
         }
+    }
+    ~ServerProxy() {
+        stop(); 
     }
        
 };
