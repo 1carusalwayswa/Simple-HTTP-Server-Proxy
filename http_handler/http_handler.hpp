@@ -3,7 +3,11 @@
 
 class HttpHandler {
 public:
-    HttpHandler(std::string msg_) : msg{msg_} ,port{80} {
+    HttpHandler() = default;
+
+    void SetHttpHandler(std::string msg_, int port_) {
+        msg = msg_;
+        port = port_;
         handler_type = "";
         // Judge type
         std::istringstream iss(msg);
