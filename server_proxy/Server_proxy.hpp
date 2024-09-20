@@ -40,6 +40,8 @@ public:
     ServerProxy(int port, std::string host) : port{port}, host{host}, server_socket{-1} {};
     
     StatusCode start() {
+        running = true;
+
         server_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (server_socket == -1) {
             return StatusCode::SOCKET_CREATION_FAILED;
