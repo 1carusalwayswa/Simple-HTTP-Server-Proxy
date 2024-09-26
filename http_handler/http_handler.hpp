@@ -52,6 +52,10 @@ public:
         return content_length;
     }
 
+    std::string GetContentType() {
+        return content_type;
+    }
+
     std::string GetBody() {
         // std::cout << "-----------------\n";
         // std::cout << body;
@@ -85,6 +89,7 @@ private:
     std::string status_code;
     std::string status_phrase;
     std::string content_length;
+    std::string content_type;
     std::string body;
 
     std::string handler_type;
@@ -114,6 +119,7 @@ private:
     void ParseResponse(std::string msg) {
         std::istringstream iss(msg);
         std::string line;
+        std::string tmp;
 
        // Get the first line
        std::getline(iss, line);
@@ -124,7 +130,9 @@ private:
        while (std::getline(iss, line)) {
             if (line.find("Content-Length:") != std::string::npos) {
                 std::istringstream iss_line(line);
-                std::string tmp;
+                iss_line >> tmp >> content_length;
+            } else if (line.find("Content-Type:" != std::string::nops)) {
+                std::istringstream iss_line(line);
                 iss_line >> tmp >> content_length;
             } else if (line.find("<html>") != std::string::npos) {
                 body += line;
