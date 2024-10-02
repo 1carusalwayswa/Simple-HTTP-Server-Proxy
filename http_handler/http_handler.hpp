@@ -6,9 +6,8 @@ class HttpHandler {
 public:
     HttpHandler() = default;
 
-    void SetHttpHandler(std::string msg_, int port_) {
-        ori_msg = msg_;
-        msg = msg_;
+    void SetHttpHandler(std::string msg_, int port_ = 80) {
+        ori_msg = msg = msg_;
         port = port_;
         handler_type = "";
         // Judge type
@@ -164,8 +163,11 @@ private:
                 std::istringstream iss_host(line);
                 std::string host_line;
                 iss_host >> host_line >> host;
-                break;
-            }
+            } else if (line.find("Content-Type:") != std::string::npos) {
+                std::istringstream iss_line(line);
+                iss_line >> tmp >> content_type;
+                return; // If there has more fields need to be find ,remove return.
+            } 
         } 
     }
 
