@@ -6,16 +6,15 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <map>
 
 #include "../blocking_queue/Blocking_queue.hpp"
+#include "../client_proxy/client_proxy.hpp"
 
-constexpr int MAX_LEN = 4096;
-std::atomic<bool> running(true);
+namespace ServerProxyUtils {
+    std::atomic<bool> running(true);
+}
 
-struct Node {
-    int client_socket;
-    std::string res;
-};
 
 class ServerProxy {
 private:
@@ -24,7 +23,27 @@ private:
 
     int port;
     std::string host;
-    BlockingQueue<Node> blocking_que;
+
+    std::mutex socket_mutex;
+
+    std::string ParseRequest(std::string msg) {
+        // Parse the msg
+        std::istringstream iss(msg);
+        std::string line;
+
+        // Get the host
+        while (std::getline(iss, line)) {
+            if (line.find("Host:") != std::string::npos) {
+                std::istringstream iss_host(line);
+                std::string host_line, host;
+                iss_host >> host_line >> host;
+                return host;
+            }
+       }
+
+       return ""; 
+    }
+
 
 public:
     enum StatusCode {
@@ -34,16 +53,33 @@ public:
         LISTEN_FAILED = 3,
         ACCEPT_FAILED = 4,
         INVALID_ADDRESS = 5,
-        CONNECT_FAILED = 6
+        CONNECT_FAILED = 6,
+        SOCKET_OPTION_FAILED = 7
     };
 
-    ServerProxy(int port, std::string host) : port{port}, host{host}, server_socket{-1} {};
+    ServerProxy(std::string host = "127.0.0.1", int port = 27777) : port{port}, host{host}, server_socket{-1} {};
     
     StatusCode start() {
-        running = true;
+        ServerProxyUtils::running = true;
 
         server_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (server_socket == -1) {
+            return StatusCode::SOCKET_CREATION_FAILED;
+        }
+
+        int opt = 1;
+        if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            std::cerr << "Failed to set SO_REUSEADDR" << std::endl;
+            close(server_socket);
+            return StatusCode::SOCKET_CREATION_FAILED;
+        }
+
+        struct timeval timeout;
+        timeout.tv_sec = TIMEOUT*10;
+        timeout.tv_usec = 0;
+        if (setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+            std::cerr << "Error setting socket options: " << strerror(errno) << std::endl;
+            close(server_socket);
             return StatusCode::SOCKET_CREATION_FAILED;
         }
 
@@ -71,12 +107,27 @@ public:
 
     StatusCode run() {
         std::thread(&ServerProxy::handle_response, this).detach();
-        while (running) {
+        while (ServerProxyUtils::running) {
             sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
             int client_socket = accept(server_socket, (sockaddr*)&client_addr, &client_len);
             if (client_socket == -1) {
                 return StatusCode::ACCEPT_FAILED;
+            }
+
+            // 设置新套接字的超时时间
+            struct timeval timeout;
+            timeout.tv_sec = TIMEOUT * 10;
+            timeout.tv_usec = 0;
+            if (setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+                std::cerr << "Failed to set receive timeout: " << strerror(errno) << std::endl;
+                close(client_socket);
+                return StatusCode::SOCKET_OPTION_FAILED;
+            }
+            if (setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+                std::cerr << "Failed to set send timeout: " << strerror(errno) << std::endl;
+                close(client_socket);
+                return StatusCode::SOCKET_OPTION_FAILED;
             }
 
             std::thread(&ServerProxy::handle_client,
@@ -87,82 +138,73 @@ public:
     }
 
     void handle_response() {
-        while (running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            Node res_node = blocking_que.pop();
+        while (ServerProxyUtils::running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ClientProxyUtils::Node res_node = SharedBlockingQueue::blocking_que.pop();
             ssize_t byte_sent = send(res_node.client_socket, res_node.res.c_str(), res_node.res.size(), 0);
+            std::cout << "[Send_Response]: "
+                      << "length: " << res_node.res.size() << " "
+                      << res_node.res.substr(0, 512)
+                      << std::endl;
             if (byte_sent == -1) {
-                std::cerr << "Failed to send response" << std::endl;
+                std::cerr << "[ServerProxy]: " << "Socket" << res_node.client_socket 
+                          << " Failed to send response" << std::endl;
                 // 处理发送失败的情况，例如关闭套接字
                 close(res_node.client_socket);
-                continue;
+                return;
             }
-            std::cout << "[Send]: "
-                      << res_node.res
-                      << std::endl;
         }
     }
 
     void handle_client(int client_socket) {
         char buffer[MAX_LEN];
         int bytes_received;
+        std::string recv_msg;
+        std::string::size_type pos;
 
-        while (running) {
-            fd_set read_fds;
-            FD_ZERO(&read_fds);
-            FD_SET(client_socket, &read_fds);
-
-            struct timeval timeout;
-            timeout.tv_sec = 10;
-            timeout.tv_usec = 0;
-
-            int activity = select(client_socket + 1, &read_fds, nullptr, nullptr, &timeout);
-
-            if (activity == -1) {
-                std::cerr << "[HandleClient]: "
-                          << "Select Error."
-                          << std::endl;
-                break;
-            } else if (activity == 0) {
-                std::cout << "[HandleClient]: "
-                          << "Timeout, closing connection"
-                          << std::endl;
-                break;
-            } else {
-                // judge client_socket is in read_fds
-                // can be removed, because there is only one fd: client_socket
-                if (FD_ISSET(client_socket, &read_fds)) {
-                    bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-                    if (bytes_received <= 0) {
-                        std::cout << "[HandleClient]: "
-                          << "Client disconnected"
-                          << std::endl;
-                        break;
-                    }
+        while (true) {
+            std::lock_guard<std::mutex> lock_guard_(socket_mutex);
+            bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+            if (bytes_received <= 0) {
+                if (bytes_received == 0) {
+                    std::cerr << "[ServerProxy]: " << "Socket" << client_socket 
+                              << " Connection closed." << std::endl
+                              << strerror(errno) << std::endl;
+                } else {
+                    std::cerr << "[ServerProxy]: " << "Scoket" << client_socket
+                              << " Failed to receive data." << std::endl
+                              << strerror(errno) << std::endl;
                 }
+                close(client_socket);
+                return;
+            }
 
-                // do some work
-                // now just print for test
-                std::cout << "Received: " << std::string(buffer, bytes_received) << std::endl;
+            recv_msg += std::string(buffer, bytes_received);
 
-                // call client_proxy do some work
-                std::string msg = std::string(buffer, bytes_received); 
-                // std::string msg = client_proxy.response();
-                blocking_que.push((Node){client_socket, msg}); 
+            // 处理接收到的数据，分离出完整的请求
+            while ((pos = recv_msg.find("\r\n\r\n")) != std::string::npos) {
+                std::string complete_request = recv_msg.substr(0, pos + 4);
+                recv_msg.erase(0, pos + 4);
+
+                // std::cout << "[Received]: "
+                //           << complete_request
+                //           << std::endl;
+                // 处理完整的请求
+                ClientProxy client_proxy(complete_request, client_socket);
+                client_proxy.run();
             }
         }
-
-        close(client_socket);
     }
 
     void stop() {
-        running = false;
+        ServerProxyUtils::running = false;
         if (server_socket != -1) {
             close(server_socket);
         }
     }
+
     ~ServerProxy() {
-        stop(); 
+        //stop(); 
     }
        
 };

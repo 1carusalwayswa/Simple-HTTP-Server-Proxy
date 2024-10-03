@@ -16,7 +16,7 @@ public:
         iss >> tmp;
 
         // Maybe some bugs in furture, because there could be more http types method!!!!
-        if (tmp == "GET") {
+        if (tmp == "GET" || tmp == "POST") {
             ParseRequest(msg);
             handler_type = "request";
         } else if (tmp.find("HTTP") != std::string::npos) {
@@ -151,6 +151,7 @@ private:
        // Parse the msg
         std::istringstream iss(msg);
         std::string line;
+        std::string tmp;
 
         // Get the first line
         std::getline(iss, line);
