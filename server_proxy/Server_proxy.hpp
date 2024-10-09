@@ -46,6 +46,7 @@ private:
 
 
 public:
+    // status code to indicate the status of the server.
     enum StatusCode {
         SUCCESS = 0,
         SOCKET_CREATION_FAILED = 1,
@@ -106,6 +107,10 @@ public:
     }
 
     StatusCode run() {
+        // start the thread to handle the response.
+        // all response will push into the BQ by the client_proxy.
+        // keep running and try to get response from the BQ.
+        // if there is a response, send it to the client.
         std::thread(&ServerProxy::handle_response, this).detach();
         while (ServerProxyUtils::running) {
             sockaddr_in client_addr;
@@ -115,7 +120,9 @@ public:
                 return StatusCode::ACCEPT_FAILED;
             }
 
-            // 设置新套接字的超时时间
+            // set the new socket timeout
+            // This timeout is used for the client_socket, not the server_socket.
+            // They both have their own timeout.
             struct timeval timeout;
             timeout.tv_sec = TIMEOUT * 10;
             timeout.tv_usec = 0;
@@ -130,6 +137,9 @@ public:
                 return StatusCode::SOCKET_OPTION_FAILED;
             }
 
+            // start a new thread to handle the client request.
+            // it will parse the request, and send the request to the server.
+            // and get the response from the server, and push the response to the BQ.
             std::thread(&ServerProxy::handle_client,
                             this, client_socket).detach();
         }
@@ -137,25 +147,31 @@ public:
         return StatusCode::SUCCESS;
     }
 
+    // handle the response from the BQ.
+    // get the response from the BQ, and send the response to the client.
+    // ** Due to we use the blocking queue, we dont need to sleep here. **
     void handle_response() {
         while (ServerProxyUtils::running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             ClientProxyUtils::Node res_node = SharedBlockingQueue::blocking_que.pop();
             ssize_t byte_sent = send(res_node.client_socket, res_node.res.c_str(), res_node.res.size(), 0);
-            std::cout << "[Send_Response]: "
-                      << "length: " << res_node.res.size() << " "
-                      << res_node.res.substr(0, 512)
-                      << std::endl;
+            // Debug
+            // std::cout << "[Send_Response]: \n"
+            //           << "Socket" << res_node.client_socket << '\n'
+            //           << "length: " << res_node.res.size() << " "
+            //           << res_node.res.substr(0, 512)
+            //           << std::endl;
             if (byte_sent == -1) {
                 std::cerr << "[ServerProxy]: " << "Socket" << res_node.client_socket 
                           << " Failed to send response" << std::endl;
-                // 处理发送失败的情况，例如关闭套接字
+                // handle the error, close the socket. 
                 close(res_node.client_socket);
                 return;
             }
         }
     }
 
+    // handle the browser(client) request.
+    // parse the request, and send the request to the server.
     void handle_client(int client_socket) {
         char buffer[MAX_LEN];
         int bytes_received;
@@ -181,15 +197,16 @@ public:
 
             recv_msg += std::string(buffer, bytes_received);
 
-            // 处理接收到的数据，分离出完整的请求
+            // handle the received data, separate the complete request
+            // to deal with the tcp stick problem.
             while ((pos = recv_msg.find("\r\n\r\n")) != std::string::npos) {
                 std::string complete_request = recv_msg.substr(0, pos + 4);
                 recv_msg.erase(0, pos + 4);
 
-                // std::cout << "[Received]: "
-                //           << complete_request
+                // Debug
+                // std::cout << "[Receive socket"<< client_socket << "]: "
+                //           << complete_request.substr(0, 512)
                 //           << std::endl;
-                // 处理完整的请求
                 ClientProxy client_proxy(complete_request, client_socket);
                 client_proxy.run();
             }
@@ -204,7 +221,7 @@ public:
     }
 
     ~ServerProxy() {
-        //stop(); 
+        stop(); 
     }
        
 };
