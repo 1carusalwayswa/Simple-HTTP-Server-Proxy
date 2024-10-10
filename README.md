@@ -28,4 +28,4 @@ After running the server proxy, you can use a web browser to send requests to th
 
 ## Some useful experience
 If you have one question, that you think you can deal with it by multithread.
-You gonna to have two, or more question. :(
+You gonna to have two, or more questions. :(
