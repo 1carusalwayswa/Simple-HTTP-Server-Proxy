@@ -14,12 +14,11 @@
 #include "../blocking_queue/Blocking_queue.hpp"
 
 #include <thread>
-#include <chrono>
 #include <regex>
 
 
 constexpr int MAX_LEN = 4096;
-constexpr int TIMEOUT = 300;
+constexpr int TIMEOUT = 3000;
 
 namespace ClientProxyUtils {
     struct SocketInfo {
@@ -38,6 +37,10 @@ namespace SharedBlockingQueue {
 
 class ClientProxy {
 private:
+    // store the map of host and socket
+    // when the host is already exist, we can reuse the socket.
+    // node also contains a mutex to protect the socket.(To avoid use the same socket at the same time, such as send and recv)
+    // use a mutex to protect the map.
     inline static std::unordered_map<std::string, ClientProxyUtils::SocketInfo> host_map;
     inline static std::mutex host_map_mutex_;
 
@@ -49,7 +52,7 @@ private:
 
 public:
     int sockfd;
-    struct sockaddr_in serverAddr; //serverAddr: 用于保存服务器地址的 sockaddr_in 结构体
+    struct sockaddr_in serverAddr;
     bool reuse_flag; // a flag to target this socket is reusable or not.
 
     
@@ -59,12 +62,13 @@ public:
     // result
     std::string result_response; 
     
-    //构造函数（含socket创建）
     ClientProxy(std::string& http_request_test, int client_socket, int port = 80) : client_socket{client_socket}, port{port} {
         reuse_flag = false;
 
-        //调用httpHandler将原始报文解析后获得主机地址和端口号
+        // use http_handler to parse the original message and get the host and port
         request_handler.SetHttpHandler(http_request_test, port);
+        
+        // Debug
         // std::cout << "-------------------" << std::endl;
         // std::cout << "Path: " << request_handler.GetPath() << std::endl;
         // std::cout << "-------------------" << std::endl;
@@ -72,6 +76,8 @@ public:
         
         std::string& server_host = request_handler.GetHost();
         int serverPort = request_handler.GetPort();
+
+        // Debug
         // std::cout << "-------------------" << std::endl;
         // std::cout << "server_host: " << server_host << std::endl;
         // std::cout << "serverPort: " << serverPort << std::endl;
@@ -82,34 +88,23 @@ public:
             // first, judge host is already exist or not
             // If it has been created, don't need to create new socket to save RTT
             
-            // 在多线程环境下安全地操作两个共享数据结构 host_map 和 socket_mutex_map。具体流程如下：
-            // 1. 锁住 host_map_mutex_，安全地查找 server_host。
-            // 2. 如果找到了对应的 sockfd，设置重用标志并获取套接字文件描述符。
-            // 3. 在内部代码块中再次锁住 socket_mutex_map_mutex_，从 socket_mutex_map 中获取与 sockfd 相关的互斥锁，确保后续对 sockfd 的操作也是线程安全的。
-
-            //std::lock_guard 是一种用于 RAII（资源获取即初始化）风格的互斥锁管理方式。它在构造时会自动锁住传递的互斥锁 host_map_mutex_，在作用域结束时（即代码块结束或异常抛出时），会自动解锁。
-            //这里的 host_map_mutex_ 是一个互斥锁，用来保护对 host_map（主机映射表）的访问。这样就可以避免多个线程同时修改或读取 host_map 导致数据不一致的问题。
             std::lock_guard<std::mutex> lock_guard_(host_map_mutex_);
 
-            //这行代码在 host_map 中查找名为 server_host 的键，并返回一个迭代器 it。如果找到了该键，迭代器将指向该元素；如果没找到，迭代器将等于 host_map.end()
             auto it = host_map.find(server_host);
             
-            //如果 it 不是 host_map.end()，说明找到了 server_host，执行下面的代码
             if (it != host_map.end()) { 
                 
-                reuse_flag = true; // 表示找到了已经存在的 server_host，可以重用之前的连接
-                sockfd = it->second.sockfd; //从 host_map 中获取与 server_host 对应的文件描述符，也就是连接这个server_host的sockfd信息
-                own_socket_mutex = it->second.own_socket_mutex; // get the mutex for this socket from host_map
+                reuse_flag = true; 
+                sockfd = it->second.sockfd; 
+                own_socket_mutex = it->second.own_socket_mutex;
             } 
             else {
-            //如果 it 是 host_map.end()，说明在host_map里就没找到server_host，执行下面的代码
-                //创建socket
+                // Create a new socket
                 sockfd = socket(AF_INET, SOCK_STREAM, 0);
                 if (sockfd < 0) {
                     std::cerr << "Error creating socket!" << std::endl;
                     return ;
                 }
-                //下面这段代码的作用是为新的服务器主机（server_host）分配一个套接字sockfd，并为该套接字创建一个独立的互斥锁，确保后续对该套接字的操作是线程安全的。
                 ClientProxyUtils::SocketInfo socket_info;
                 socket_info.sockfd = sockfd;
                 socket_info.own_socket_mutex = std::make_shared<std::mutex>();
@@ -120,18 +115,13 @@ public:
             }
         }
         
-        //这段代码的功能是：
-        // 1. 初始化 serverAddr，设置通信的协议族（IPv4）和端口号
-        // 2. 使用 getaddrinfo 解析主机名 server_host，获取服务器的 IP 地址
-        // 3. 将解析得到的 IP 地址填充到 serverAddr.sin_addr 中，最终可以用这个结构来建立连接。
-        
         memset(&serverAddr, (int)0, sizeof(serverAddr));
         serverAddr.sin_family = AF_INET;
-        serverAddr.sin_port = htons(port);            // 将端口号转换为网络字节序
+        serverAddr.sin_port = htons(port);
         
         struct addrinfo hints, *res;
         memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET; // 仅获取 IPv4 地址
+        hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
 
         if (getaddrinfo(server_host.c_str(), nullptr, &hints, &res) != 0) {
@@ -153,6 +143,7 @@ public:
             return;
         }
 
+        // Debug
         // If you want to print some useful information, do like this.
         // std::cout << "\n[ClientProxy]: "
         //           << "Server Host: " << server_host
@@ -170,7 +161,9 @@ public:
         host_map.erase(request_handler.GetHost());
     }
     
-    // 尝试连接到服务器
+    // Connect to server
+    // If the connection is successful, return true
+    // Otherwise, return false, and print some error information.
     bool connectToServer() {
         std::lock_guard<std::mutex> lock_guard_(*own_socket_mutex);
         if (connect(sockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
@@ -184,7 +177,7 @@ public:
         }
     }
 
-    // 发送HTTP请求
+    // send HTTP request
     void sendRequest() {
         std::lock_guard<std::mutex> lock_guard_(*own_socket_mutex);
         std::string request = request_handler.GetRequest();
@@ -219,34 +212,24 @@ public:
         }
     }
 
-    // Mix the response
-    // call by reference, modify the original script by invoke this function in member fucntion "receive()"
-   #include <regex>
-#include <string>
-
 // Mix the response
 // call by reference, modify the original script by invoke this function in member function "receive()"
     void mix_response(std::string& receivedData) {
-        // 使用正则表达式匹配 img 标签，不区分大小写
-        std::string result;
-
-        // 替换 img 标签之外的 Stockholm，不区分大小写
         std::regex html_tag_regex(R"(<[^>]*>)");
-        std::string::const_iterator start = result.cbegin();
-        std::string::const_iterator end = result.cend();
+        std::string::const_iterator start = receivedData.cbegin();
+        std::string::const_iterator end = receivedData.cend();
         std::string final_result;
         std::smatch tag_match;
         
         while (start != end) {
             if (std::regex_search(start, end, tag_match, html_tag_regex)) {
-                final_result.append(start, tag_match[0].first); // 添加标签之前的内容
                 std::string text_to_replace(start, tag_match[0].first);
                 text_to_replace = std::regex_replace(text_to_replace, std::regex("stockholm", std::regex_constants::icase), "Linköping");
-                final_result.append(text_to_replace); // 添加替换后的文本
-                final_result.append(tag_match[0].first, tag_match[0].second); // 添加标签本身
-                start = tag_match[0].second; // 更新搜索起点
+                final_result.append(text_to_replace);
+                final_result.append(tag_match[0].first, tag_match[0].second);
+                start = tag_match[0].second;
             } else {
-                final_result.append(start, end); // 添加剩余的内容
+                final_result.append(start, end);
                 break;
             }
         }
@@ -342,17 +325,20 @@ public:
                     }
                 }
                 recv_msg = recv_msg.substr(head_end + content_length);
+                // Debug
                 // if (body.find("Stock") != std::string::npos) {
                 //     std::cout << "---------------------\n";
                 //     std::cout << "Body: " << body << std::endl;
                 //     std::cout << "---------------------\n";
                 // }
 
-                if (response_handler.GetContentType() == "text/html") {
+               if (response_handler.GetContentType().find("text/html") != std::string::npos) {
                     mix_response(body);
                 }
                 // finnaly, we get the response, just store the response in BQ.
                 SharedBlockingQueue::blocking_que.push((ClientProxyUtils::Node){client_socket, headers + body}); 
+
+                // Debug
                 // std::cout << "[Socket " << client_socket << " recv:] "
                           //<< headers
                         //   << "length: " << headers.size() << " " << body.size() << '\n'
@@ -378,13 +364,6 @@ public:
         // Done in 2024-10-01
     }
 
-    // Be careful for data consistency, sendHttp and receive must do in one step
-    // never try to run them sperately.
-    // Because if we try to run sendHttp first
-    // we hold the lock, so that time only we can send
-    // But if we unhold the lock, than other thread hold the lock and try to recv
-    // it will recv response which sends to this thread.
-    // I know it looks so stupid now, I will try to make a more elegant implementing later.XD
     void run() {
         sendRequest();
     }
