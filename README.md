@@ -1,5 +1,5 @@
-# A simple proxy server
-#### Implement By Li Yang & Li RuiJie
+# A simple fake news proxy server
+#### Implement By 1carus and Jerry.
 
 
 ## Introduction
